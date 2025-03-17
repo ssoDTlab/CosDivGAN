@@ -10,8 +10,6 @@ import torchvision.transforms as transforms
 import torchvision.utils as vutils
 import numpy as np
 import matplotlib.pyplot as plt
-import matplotlib.animation as animation
-from IPython.display import HTML
 import torch.nn.functional as F
 
 
@@ -63,7 +61,7 @@ def main():
     ngpu = 1
 
     # diversity_loss의 계수
-    diversity_lambda = 0.1
+    diversity_lambda = 0.005
 
     # 우리가 설정한 대로 이미지 데이터셋을 불러와 봅시다
     # 먼저 데이터셋을 만듭니다
@@ -100,53 +98,50 @@ def main():
             nn.init.constant_(m.bias.data, 0)
 
     # 생성된 배치 내 이미지들이 서로 다른 특징들을 가지도록 유도
-    def diversity_loss_cosine(fake_imgs):
-        bs = fake_imgs.shape[0]
+    def diversity_loss_cosine(fake_features):
+        bs = fake_features.shape[0]
 
-        # 이미지를 Flatten하여 벡터화
-        reshaped = fake_imgs.view(bs, -1)  # (batch_size, feature_dim)
+        # Flatten하여 벡터화
+        reshaped = fake_features.view(bs, -1)  # (batch_size, feature_dim)
 
-        # L2 정규화 (크기를 1로 맞춰 방향만 비교)
+        # L2 정규화
         normed = F.normalize(reshaped, p=2, dim=1)
 
-        # 코사인 유사도 계산 (dot product)
-        cosine_sim = torch.mm(normed, normed.T)  # (bs, bs)
+        # 코사인 유사도 계산
+        cosine_sim = torch.mm(normed, normed.T)
 
-        cosine_sim.fill_diagonal_(0)  # 대각선 요소를 0으로 설정
-        loss = 1 - cosine_sim.sum() / (bs * (bs - 1))  # 평균 유사도 계산 시 대각선 제외
+        cosine_sim.fill_diagonal_(0)
+        loss = 1 - cosine_sim.sum() / (bs * (bs - 1))
 
         return loss
 
-    # 생성자 코드
     class Generator(nn.Module):
         def __init__(self, ngpu):
             super(Generator, self).__init__()
             self.ngpu = ngpu
-            self.main = nn.Sequential(
-                # 입력데이터 Z가 가장 처음 통과하는 전치 합성곱 계층입니다.
+            self.features = nn.Sequential(
                 nn.ConvTranspose2d(nz, ngf * 8, 4, 1, 0, bias=False),
                 nn.BatchNorm2d(ngf * 8),
                 nn.ReLU(True),
-                # 위의 계층을 통과한 데이터의 크기. ``(ngf*8) x 4 x 4``
                 nn.ConvTranspose2d(ngf * 8, ngf * 4, 4, 2, 1, bias=False),
                 nn.BatchNorm2d(ngf * 4),
                 nn.ReLU(True),
-                # 위의 계층을 통과한 데이터의 크기. ``(ngf*4) x 8 x 8``
                 nn.ConvTranspose2d(ngf * 4, ngf * 2, 4, 2, 1, bias=False),
                 nn.BatchNorm2d(ngf * 2),
                 nn.ReLU(True),
-                # 위의 계층을 통과한 데이터의 크기. ``(ngf*2) x 16 x 16``
                 nn.ConvTranspose2d(ngf * 2, ngf, 4, 2, 1, bias=False),
                 nn.BatchNorm2d(ngf),
                 nn.ReLU(True),
-                # 위의 계층을 통과한 데이터의 크기. ``(ngf) x 32 x 32``
+            )
+            self.output = nn.Sequential(
                 nn.ConvTranspose2d(ngf, nc, 4, 2, 1, bias=False),
                 nn.Tanh()
-                # 위의 계층을 통과한 데이터의 크기. ``(nc) x 64 x 64``
             )
 
         def forward(self, input):
-            return self.main(input)
+            feat = self.features(input)  # 특성맵 추출
+            img = self.output(feat)
+            return img, feat
 
     # 구분자 코드
     class Discriminator(nn.Module):
@@ -222,11 +217,7 @@ def main():
 
     # 학습 과정
 
-    # 학습상태를 체크하기 위해 손실값들을 저장합니다
-    img_list = []
-    G_losses = []
-    D_losses = []
-    iters = 0
+
 
     print("Starting Training Loop...")
     # 에폭(epoch) 반복
@@ -256,10 +247,10 @@ def main():
             # 생성자에 사용할 잠재공간 벡터를 생성합니다
             noise = torch.randn(b_size, nz, 1, 1, device=device)
             # G를 이용해 가짜 이미지를 생성합니다
-            fake = netG(noise)
+            fake_img,fake_feat = netG(noise)
             label.fill_(fake_label)
             # D를 이용해 데이터의 진위를 판별합니다
-            output = netD(fake.detach()).view(-1)
+            output = netD(fake_img.detach()).view(-1)
             # D의 손실값을 계산합니다
             errD_fake = criterion(output, label)
             # 역전파를 통해 변화도를 계산합니다. 이때 앞서 구한 변화도에 더합니다(accumulate)
@@ -278,9 +269,9 @@ def main():
             label.fill_(real_label)  # 생성자의 손실값을 구하기 위해 진짜 라벨을 이용할 겁니다
             # 우리는 방금 D를 업데이트했기 때문에, D에 다시 가짜 데이터를 통과시킵니다.
             # 이때 G는 업데이트되지 않았지만, D가 업데이트 되었기 때문에 앞선 손실값가 다른 값이 나오게 됩니다
-            output = netD(fake).view(-1)
+            output = netD(fake_img).view(-1)
             # G의 손실값을 구합니다
-            errG = criterion(output, label) - diversity_lambda * diversity_loss_cosine(fake)
+            errG = criterion(output, label) - diversity_lambda * diversity_loss_cosine(fake_feat)
             # G의 변화도를 계산합니다
             errG.backward()
             D_G_z2 = output.mean().item()
@@ -293,17 +284,6 @@ def main():
                       % (epoch, num_epochs, i, len(dataloader),
                          errD.item(), errG.item(), D_x, D_G_z1, D_G_z2))
 
-            # 이후 그래프를 그리기 위해 손실값들을 저장해둡니다
-            G_losses.append(errG.item())
-            D_losses.append(errD.item())
-
-            # fixed_noise를 통과시킨 G의 출력값을 저장해둡니다
-            if (iters % 500 == 0) or ((epoch == num_epochs - 1) and (i == len(dataloader) - 1)):
-                with torch.no_grad():
-                    fake = netG(fixed_noise).detach().cpu()
-                img_list.append(vutils.make_grid(fake, padding=2, normalize=True))
-
-            iters += 1
 
     # clean-FID 측정
     # 저장할 디렉토리 설정
