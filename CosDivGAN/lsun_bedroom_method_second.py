@@ -311,10 +311,12 @@ def train_gan(epoch_setting):
                 adjustment_factor = 2.0 / (1.0 + math.exp(-beta * delta)) - 1.0
 
                 # 지수 함수를 통한 다양성 조정
-                if adjustment_factor > 0:  # D가 우세
-                    effective_lambda = original_diversity_lambda * math.exp(-adjustment_factor)
-                else:  # G가 우세
-                    effective_lambda = original_diversity_lambda * math.exp(abs(adjustment_factor))
+                if adjustment_factor > 0:  # D가 우세할 때
+                    # D가 우세하면 다양성 패널티를 증가시켜 D를 약화시킴
+                    effective_lambda = original_diversity_lambda * math.exp(adjustment_factor)
+                else:  # G가 우세할 때
+                    # G가 우세하면 다양성 패널티를 감소시켜 D를 강화시킴
+                    effective_lambda = original_diversity_lambda * math.exp(-abs(adjustment_factor))
 
                 # 로그 스케일 제한
                 min_lambda = original_diversity_lambda / bound_factor
