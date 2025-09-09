@@ -7,11 +7,28 @@ import torch.optim as optim
 import torch.utils.data
 import torchvision.datasets as dset
 import torchvision.transforms as transforms
+import torchvision.utils as vutils
+import matplotlib.pyplot as plt
 import torch.nn.functional as F
+from cleanfid import fid
 
-def train(epoch_setting, dataroot):
 
-    workers = 4
+
+
+def train_gan(epoch_setting):
+    print(f"\n{'=' * 50}")
+    print(f"{'=' * 50}\n")
+
+    manualSeed = 999
+    print("Random Seed: ", manualSeed)
+    random.seed(manualSeed)
+    torch.manual_seed(manualSeed)
+    torch.use_deterministic_algorithms(True)
+  
+    #dataroot = "/content/data/celeba"
+    dataroot = "/content/data/lsun_bedroom/data0/lsun/bedroom"
+    workers = 4 
+
     batch_size = 128
     image_size = 64
     nc = 3
@@ -19,22 +36,14 @@ def train(epoch_setting, dataroot):
     ngf = 64
     ndf = 64
     num_epochs = epoch_setting
-
-    # Different learning rates for TTUR
-    lr_D = 0.0001  # Discriminator learning rate (set higher)
-    lr_G = 0.0004  # Generator learning rate (set lower)
-
+    lr_D = 0.0001  
+    lr_G = 0.0004 
     beta1 = 0.5
-
     ngpu = 1
-
-    # Initial coefficient for diversity loss (used for adaptive weight adjustment)
-    diversity_lambda = 0.5  # Set initial value lower
+    diversity_lambda = 0.5 
     adaptive_weight = True
-    diversity_max = 10.0  # Maximum diversity weight
-    diversity_step = 0.5  # Amount to increase per epoch (more gradual)
-
-
+    diversity_max = 10.0 
+    diversity_step = 0.5  
     dataset = dset.ImageFolder(root=dataroot,
                                transform=transforms.Compose([
                                    transforms.Resize(image_size),
@@ -56,7 +65,6 @@ def train(epoch_setting, dataroot):
             nn.init.normal_(m.weight.data, 1.0, 0.02)
             nn.init.constant_(m.bias.data, 0)
 
-    # Encourage different features between generated images in a batch
     def diversity_loss_cosine(fake_features):
         bs = fake_features.shape[0]
 
@@ -73,13 +81,11 @@ def train(epoch_setting, dataroot):
 
         return weighted_sim.sum() / (bs * (bs - 1))
 
-    # Modified Generator class (returns intermediate feature maps)
     class Generator(nn.Module):
         def __init__(self, ngpu):
             super(Generator, self).__init__()
             self.ngpu = ngpu
 
-            # Initial feature extraction (latent space -> intermediate features)
             self.features_mid = nn.Sequential(
                 nn.ConvTranspose2d(nz, ngf * 8, 4, 1, 0, bias=False),
                 nn.BatchNorm2d(ngf * 8),
@@ -89,7 +95,6 @@ def train(epoch_setting, dataroot):
                 nn.ReLU(True),
             )
 
-            # Intermediate features -> final features
             self.features_final = nn.Sequential(
                 nn.ConvTranspose2d(ngf * 4, ngf * 2, 4, 2, 1, bias=False),
                 nn.BatchNorm2d(ngf * 2),
@@ -99,38 +104,33 @@ def train(epoch_setting, dataroot):
                 nn.ReLU(True),
             )
 
-            # Final output layer
             self.output = nn.Sequential(
                 nn.ConvTranspose2d(ngf, nc, 4, 2, 1, bias=False),
                 nn.Tanh()
             )
 
         def forward(self, input):
-            # Extract intermediate feature maps
             mid_feat = self.features_mid(input)
 
-            # Extract final feature maps
             final_feat = self.features_final(mid_feat)
 
-            # Generate image
             img = self.output(final_feat)
 
-            # Return image and two feature maps
             return img, final_feat, mid_feat
 
+
+    from torch.nn.utils import spectral_norm
 
     class Discriminator(nn.Module):
         def __init__(self, ngpu):
             super(Discriminator, self).__init__()
             self.ngpu = ngpu
 
-            # Initial feature extraction
             self.features_init = nn.Sequential(
                 nn.Conv2d(nc, ndf, 4, 2, 1, bias=False),
                 nn.LeakyReLU(0.2, inplace=True)
             )
 
-            # Intermediate feature extraction
             self.features_mid = nn.Sequential(
                 nn.Conv2d(ndf, ndf * 2, 4, 2, 1, bias=False),
                 nn.BatchNorm2d(ndf * 2),
@@ -140,14 +140,12 @@ def train(epoch_setting, dataroot):
                 nn.LeakyReLU(0.2, inplace=True)
             )
 
-            # Final feature extraction
             self.features_final = nn.Sequential(
                 nn.Conv2d(ndf * 4, ndf * 8, 4, 2, 1, bias=False),
                 nn.BatchNorm2d(ndf * 8),
                 nn.LeakyReLU(0.2, inplace=True)
             )
 
-            # Output discrimination value
             self.output = nn.Sequential(
                 nn.Conv2d(ndf * 8, 1, 4, 1, 0, bias=False),
                 nn.Sigmoid()
@@ -176,39 +174,34 @@ def train(epoch_setting, dataroot):
     real_label = 1.
     fake_label = 0.
 
-    # Create Adam optimizers with TTUR learning rates for G and D
     optimizerD = optim.Adam(netD.parameters(), lr=lr_D, betas=(beta1, 0.999))
     optimizerG = optim.Adam(netG.parameters(), lr=lr_G, betas=(beta1, 0.999))
 
-    # Add learning rate schedulers (for performance stabilization)
     schedulerD = torch.optim.lr_scheduler.CosineAnnealingLR(optimizerD, T_max=num_epochs, eta_min=lr_D * 0.1)
     schedulerG = torch.optim.lr_scheduler.CosineAnnealingLR(optimizerG, T_max=num_epochs, eta_min=lr_G * 0.1)
 
+    diversity_scores = []
     d_losses = []
     g_losses = []
 
     print("Starting Training Loop...")
     for epoch in range(num_epochs):
-        # Adaptive weight adjustment (gradual increase, more fine-tuned)
         if adaptive_weight and epoch > 0:
-            # Increase gradually with epochs
             diversity_lambda = min(diversity_max, diversity_lambda + diversity_step)
 
         for i, data in enumerate(dataloader, 0):
-
+          
             netD.zero_grad()
             real_cpu = data[0].to(device)
             b_size = real_cpu.size(0)
-
             label_real = torch.full((b_size,), real_label, dtype=torch.float, device=device)
-            label_fake = torch.full((b_size,), fake_label, dtype=torch.float, device=device)
-
+            label_fake = torch.full((b_size,), fake_label, dtype=torch.float, device=device)          
             output, real_features, d_real_mid_features = netD(real_cpu, return_features=True)
             errD_real = criterion(output, label_real)
 
             D_x = output.mean().item()
 
-
+         
             noise = torch.randn(b_size, nz, 1, 1, device=device)
             fake_img, fake_final_feat, fake_mid_feat = netG(noise)
             output, fake_features, d_fake_mid_features = netD(fake_img.detach(), return_features=True)
@@ -216,7 +209,6 @@ def train(epoch_setting, dataroot):
 
             D_G_z1 = output.mean().item()
 
-            # diversity_loss
             diversity_loss_d_real_mid = diversity_loss_cosine(d_real_mid_features)
             diversity_loss_d_fake_mid = diversity_loss_cosine(d_fake_mid_features)
             epsilon = 1e-8
@@ -227,7 +219,6 @@ def train(epoch_setting, dataroot):
             errD = errD_real + errD_fake + penalty
             errD.backward()
             optimizerD.step()
-
 
             netG.zero_grad()
             output, fake_features,_  = netD(fake_img, return_features=True)
@@ -254,3 +245,7 @@ def train(epoch_setting, dataroot):
 
         schedulerD.step()
         schedulerG.step()
+
+
+
+
